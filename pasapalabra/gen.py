@@ -1,10 +1,11 @@
 import argparse
 import csv
 import random
-import requests
-import unicodedata
 
-WIKTIONARY_API = "https://es.wiktionary.org/w/api.php"
+import defs.rae as rae
+import defs.wiktionary as wikt
+
+sources = { "rae": rae, "wikt": wikt }
 
 def strip_accents(s):
     """Remove accents from words so that first letter is accent-insensitive"""
@@ -19,41 +20,17 @@ def load_words(filename):
     """Load word-frequency list from CSV: word,frequency"""
     words = []
     with open(filename, newline='', encoding='utf-8') as f:
-        reader = csv.reader(f, delimiter='\t')
+        reader = csv.reader(f)
         next(reader) # Omit headers
         for word, freq in reader:
             words.append((word.lower(), float(freq)))
     return words
 
-def get_definition(word):
-    """Fetch definition from Wiktionary"""
-    params = {
-        "action": "query",
-        "prop": "extracts",
-        "titles": word,
-        "format": "json",
-        "explaintext": True
-    }
-    r = requests.get(WIKTIONARY_API, params=params)
-    data = r.json()
-    pages = data.get("query", {}).get("pages", {})
-    for page in pages.values():
-        extract = page.get("extract", "")
-        if extract:
-            start = extract.find("1\n") + 2
-            end = extract.find("\n", start)
-            definition = extract[start:end]
-            return definition
-    return None
-
-def validate_word(word, definition):
-    return len(word) >= 3 and len(word.split()) == 1 and \
-            len(definition.split()) in range(4, 20)
-
-def generate_rosco(words, attempts_per_letter):
+def generate_rosco(words, attempts_per_letter, source=wikt):
     """Generate a rosco from the word list"""
     rosco = {}
-    letters = [chr(c) for c in range(ord('A'), ord('Z') + 1)] + ['Ñ']
+    letters = 'ABCDEFGHIJLMNÑOPQRSTUVXYZ'
+    can_contain = 'HJÑQUXYZ'
     
     # Pre-group words by starting letter
     grouped = {}
@@ -61,11 +38,11 @@ def generate_rosco(words, attempts_per_letter):
         first_letter = strip_accents(w[0].upper())
         grouped.setdefault(first_letter, []).append((w, f))
 
+        for letter in w.upper().replace('ñ', 'Ñ'):
+            if letter in can_contain:
+                grouped.setdefault(letter, []).append((w, f))
+
     for letter in letters:
-        if letter not in grouped:
-            rosco[letter] = (None, None)
-            continue
-        
         candidates = grouped[letter]
         words_only = [w for w, _ in candidates]
         freqs = [f for _, f in candidates]
@@ -75,8 +52,8 @@ def generate_rosco(words, attempts_per_letter):
         
         for _ in range(attempts_per_letter):
             word = random.choices(words_only, weights=freqs, k=1)[0]
-            definition = get_definition(word)
-            if definition and validate_word(word, definition):
+            definition = source.get_definition(word)
+            if definition:
                 chosen_word = word
                 chosen_def = definition
                 break
@@ -85,19 +62,36 @@ def generate_rosco(words, attempts_per_letter):
     
     return rosco
 
+def make_definition(letter, word, definition):
+
+    if word == None:
+        return "N/A"
+
+    if letter == word.upper()[0]:
+        return f"[{letter}] {definition}"
+    else:
+        return f"[Contiene {letter}] {definition}"
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("dictionary", help="Path to the dictionary file.")
-    parser.add_argument("-n", "--num_iters", default=10, help="Number of attempts for each letter")
+    parser.add_argument("-d", "--dest_file", help="Path in which the output files will be saved.")
+    parser.add_argument("-s", "--source", default="wikt", choices=sources.keys(), help="From which dictionary fetch the definitions.")
+    parser.add_argument("-n", "--num_iters", type=int, default=1, help="Number of attempts for each letter.")
 
     args = parser.parse_args()
 
     words = load_words(args.dictionary)
-    rosco = generate_rosco(words, attempts_per_letter=args.num_iters)
+    rosco = generate_rosco(words, attempts_per_letter=args.num_iters, source=sources[args.source])
 
-    for letter, (word, definition) in rosco.items():
-        if word and definition:
-            print(f"{letter}: ({word}) {definition}")
-        else:
-            print(f"{letter}: [No encontrado]")
+    words_only = [word if word else 'N/A' for _, (word, _) in rosco.items()]
+    definitions = [
+        make_definition(letter, word, definition) for letter, (word, definition) in rosco.items()
+    ]
+
+    with open(f"{args.dest_file}/words.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(words_only))
+
+    with open(f"{args.dest_file}/definitions.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(definitions))
